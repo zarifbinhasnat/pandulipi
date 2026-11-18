@@ -118,10 +118,17 @@ enum BookStructure {
                     blocks.append(.heading(level: h, text: joined))
                     continue
                 }
+                // A long title wrapped over several lines: "Two Revolutionaries:" + "Napoleon III and Bismarck".
+                if kind == .body, lines.count <= 2, case .heading(1, let t)? = blocks.last,
+                   headingContinues(t), joined.split(separator: " ").count <= 10, !joined.hasSuffix(".") {
+                    blocks[blocks.count - 1] = .heading(level: 1, text: t + " " + joined)
+                    continue
+                }
                 // The title line right after "CHAPTER TWO" / "প্রথম অধ্যায়".
-                if kind == .body, lines.count <= 2, case .heading(1, let label)? = blocks.last,
+                if kind == .body, lines.count <= 5, case .heading(1, let label)? = blocks.last,
                    matches(label, chapterLabel) || matches(label, numberWord),
-                   joined.split(separator: " ").count <= 16, !joined.hasSuffix(".") {
+                   lines.allSatisfy({ $0.split(separator: " ").count <= 8 }),
+                   joined.split(separator: " ").count <= 20, !joined.hasSuffix(".") {
                     blocks.append(.heading(level: 1, text: joined))
                     continue
                 }
@@ -335,6 +342,13 @@ enum BookStructure {
             return 1
         }
         return nil
+    }
+
+    /// True when a heading obviously runs on to the next line.
+    private static func headingContinues(_ t: String) -> Bool {
+        if let c = t.last, ":,–—-&".contains(c) { return true }
+        let last = t.split(separator: " ").last.map { $0.lowercased() } ?? ""
+        return ["the", "of", "and", "or", "a", "an", "to", "in", "for", "on", "with", "from", "at", "by", "ও", "এবং"].contains(last)
     }
 
     private static func mergeNumberedHeadings(_ blocks: [Block]) -> [Block] {
