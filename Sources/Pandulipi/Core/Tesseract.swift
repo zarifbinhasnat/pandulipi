@@ -1,9 +1,15 @@
 import Foundation
 
 enum Tesseract {
-    static let path: String? = [
-        "/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/opt/local/bin/tesseract",
-    ].first { FileManager.default.isExecutableFile(atPath: $0) }
+    /// Looked up each time so a fresh install is picked up without relaunching.
+    /// `PANDULIPI_TESSERACT=none` simulates a Mac without Tesseract (for testing).
+    static var path: String? {
+        if let forced = ProcessInfo.processInfo.environment["PANDULIPI_TESSERACT"] {
+            return FileManager.default.isExecutableFile(atPath: forced) ? forced : nil
+        }
+        return ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/opt/local/bin/tesseract"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
 
     static var isInstalled: Bool { path != nil }
 

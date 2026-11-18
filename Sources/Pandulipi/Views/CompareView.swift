@@ -96,6 +96,7 @@ struct CompareView: View {
 struct PageImagePane: View {
     let image: NSImage?
     let caption: String
+    var loading = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -106,16 +107,19 @@ struct PageImagePane: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(.quaternary.opacity(0.4))
                 if let image {
-                    ScrollView([.vertical, .horizontal]) {
+                    ScrollView(.vertical) {
                         Image(nsImage: image)
                             .resizable()
                             .interpolation(.high)
-                            .scaledToFit()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity)
                             .shadow(radius: 2)
                             .padding(8)
                     }
-                } else {
+                } else if loading {
                     ProgressView()
+                } else {
+                    Text("The page being read appears here.").font(.callout).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -162,9 +166,17 @@ struct ResultPane: View {
     @ViewBuilder private var content: some View {
         switch run.state {
         case .failed(let msg):
-            Label(msg, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 12) {
+                Label(msg, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                if msg.contains("Setup") {
+                    Button { AppModel.shared.showSetup = true } label: {
+                        Label("Open Setup", systemImage: "wrench.and.screwdriver")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
         case .running where run.text.isEmpty:
             VStack(spacing: 8) {
                 ProgressView()
@@ -173,7 +185,7 @@ struct ResultPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .idle where run.text.isEmpty:
-            Text("Cancelled").foregroundStyle(.secondary)
+            Color.clear
         default:
             ScrollView {
                 Text(run.text)

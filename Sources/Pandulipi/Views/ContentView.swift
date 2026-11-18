@@ -44,6 +44,12 @@ struct ContentView: View {
                     .disabled(app.document == nil)
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
+                    if app.setupIncomplete {
+                        Button { app.showSetup = true } label: {
+                            Label("Setup", systemImage: app.canTranscribe ? "wrench.and.screwdriver" : "exclamationmark.triangle.fill")
+                        }
+                        .help("Install or start the OCR engines")
+                    }
                     Button { app.presentOpenPanel() } label: {
                         Label("Open", systemImage: "doc.badge.plus")
                     }
@@ -77,7 +83,11 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showModels) { ModelManagerView() }
+        .sheet(isPresented: $app.showSetup) { SetupSheet() }
         .alert("Pandulipi", isPresented: Binding(get: { app.alert != nil }, set: { if !$0 { app.alert = nil } })) {
+            if app.alert?.contains("Setup") == true {
+                Button("Open Setup") { app.showSetup = true }
+            }
             Button("OK", role: .cancel) {}
         } message: {
             Text(app.alert ?? "")
@@ -132,22 +142,10 @@ struct WelcomeView: View {
             .buttonStyle(.borderedProminent)
             Text("or drop a file anywhere in this window").font(.callout).foregroundStyle(.tertiary)
 
-            VStack(alignment: .leading, spacing: 10) {
-                StatusRow(ok: Tesseract.isInstalled,
-                          title: "Tesseract",
-                          detail: app.tesseractVersion.map { "\($0) · \(app.tessLanguages.count) languages" + (app.tessLanguages.contains("ben") ? " incl. Bangla" : "") }
-                              ?? "Not found — brew install tesseract tesseract-lang")
-                StatusRow(ok: app.ollamaVersion != nil,
-                          title: "Ollama",
-                          detail: app.ollamaVersion.map { "v\($0) running" } ?? "Not running — open the Ollama app")
-                StatusRow(ok: !app.visionModels.isEmpty,
-                          title: "Vision model",
-                          detail: app.visionModels.isEmpty ? "None installed — open Models to download one"
-                              : app.visionModels.map(\.name).joined(separator: ", "))
-            }
-            .padding(16)
-            .frame(width: 460, alignment: .leading)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+            SetupChecklist()
+                .padding(18)
+                .frame(width: 560, alignment: .leading)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
 
             HStack {
                 Button("Manage Models…") { showModels = true }

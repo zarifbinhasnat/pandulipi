@@ -25,7 +25,12 @@ struct ReviewView: View {
                     HStack {
                         Image(systemName: app.results[p] == nil ? "circle" : "checkmark.circle.fill")
                             .foregroundStyle(app.results[p] == nil ? Color.secondary : Color.green)
-                        Text("Page \(p + 1)")
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Page \(p + 1)")
+                            if let label = app.pageLabels[p] {
+                                Text(label).font(.caption2).foregroundStyle(.purple).lineLimit(1)
+                            }
+                        }
                         Spacer()
                         if app.rerunningPages.contains(p) { ProgressView().controlSize(.small) }
                         else if let r = app.results[p] {

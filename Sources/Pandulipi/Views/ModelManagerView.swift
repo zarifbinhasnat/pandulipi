@@ -5,11 +5,6 @@ struct ModelManagerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var customName = ""
-    @State private var pulling: String?
-    @State private var pullStatus = ""
-    @State private var pullDone: Int64 = 0
-    @State private var pullTotal: Int64 = 0
-    @State private var pullTask: Task<Void, Never>?
     @State private var error: String?
     @State private var confirmDelete: String?
 
@@ -26,9 +21,7 @@ struct ModelManagerView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     if app.ollamaVersion == nil {
-                        Label("Ollama isn't running. Open the Ollama app, then press Refresh.", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                        Button("Refresh") { Task { await app.refreshModels() } }
+                        SetupChecklist(compact: true)
                     }
 
                     section("Installed") {
@@ -67,28 +60,13 @@ struct ModelManagerView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .onSubmit { pull(customName) }
                             Button("Download") { pull(customName) }
-                                .disabled(customName.trimmed.isEmpty || pulling != nil)
+                                .disabled(customName.trimmed.isEmpty || app.pullName != nil)
                         }
                         Link("Browse vision models on ollama.com", destination: URL(string: "https://ollama.com/search?c=vision")!)
                             .font(.caption)
-                        if let pulling {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text("Downloading \(pulling)").font(.callout.weight(.medium))
-                                    Spacer()
-                                    Button("Cancel") { pullTask?.cancel() }.buttonStyle(.link)
-                                }
-                                if pullTotal > 0 {
-                                    ProgressView(value: Double(pullDone), total: Double(pullTotal))
-                                    Text("\(pullStatus) — \(Fmt.bytes(UInt64(pullDone))) of \(Fmt.bytes(UInt64(pullTotal)))")
-                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                } else {
-                                    ProgressView().progressViewStyle(.linear)
-                                    Text(pullStatus).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(10)
-                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                        if let name = app.pullName { PullProgress(name: name) }
+                        if let e = app.pullError {
+                            Label(e, systemImage: "xmark.octagon.fill").foregroundStyle(.red).font(.caption)
                         }
                         if let error {
                             Label(error, systemImage: "xmark.octagon.fill").foregroundStyle(.red).font(.caption)
@@ -114,7 +92,7 @@ struct ModelManagerView: View {
                                 if installed {
                                     Label("Installed", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
                                 } else {
-                                    Button("Get") { pull(c.name) }.disabled(pulling != nil)
+                                    Button("Get") { pull(c.name) }.disabled(app.pullName != nil)
                                 }
                             }
                             .padding(.vertical, 3)
@@ -147,28 +125,7 @@ struct ModelManagerView: View {
     }
 
     private func pull(_ name: String) {
-        let name = name.trimmed
-        guard !name.isEmpty, pulling == nil else { return }
-        pulling = name
-        pullStatus = "Starting…"
-        pullDone = 0
-        pullTotal = 0
-        error = nil
-        pullTask = Task {
-            do {
-                try await OllamaClient.shared.pull(model: name) { status, done, total in
-                    pullStatus = status
-                    if total > 0 { pullDone = done; pullTotal = total }
-                }
-                await app.refreshModels()
-                if app.models.first(where: { $0.name.hasPrefix(name) })?.isVision == true, app.visionModels.count == 1 {
-                    app.selectedModel = app.models.first { $0.name.hasPrefix(name) }!.name
-                }
-                customName = ""
-            } catch {
-                if !Task.isCancelled { self.error = AppModel.friendly(error) }
-            }
-            pulling = nil
-        }
+        app.pull(name)
+        if app.pullName != nil { customName = "" }
     }
 }

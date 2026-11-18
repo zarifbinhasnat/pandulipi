@@ -15,7 +15,9 @@ final class AppModel: ObservableObject {
     @Published var rerunningPages: Set<Int> = []
 
     // MARK: Settings (persisted)
-    @Published var engine: OCREngine { didSet { defaults.set(engine.rawValue, forKey: "engine") } }
+    @Published var engine: OCREngine { didSet { if userChoseEngine { defaults.set(engine.rawValue, forKey: "engine") } } }
+    /// Set when the user picks an engine themselves; auto-picks aren't saved.
+    var userChoseEngine = false
     @Published var selectedModel: String { didSet { defaults.set(selectedModel, forKey: "model") } }
     @Published var tessLang: String { didSet { defaults.set(tessLang, forKey: "tessLang") } }
     @Published var modelImageSize: Double { didSet { defaults.set(modelImageSize, forKey: "modelPx") } }
@@ -27,7 +29,24 @@ final class AppModel: ObservableObject {
     @Published var models: [OllamaModel] = []
     @Published var ollamaVersion: String?
     @Published var tessLanguages: [String] = []
-    let tesseractVersion = Tesseract.version()
+    @Published var tesseractVersion = Tesseract.version()
+
+    // MARK: Setup assistant
+    @Published var showSetup = false
+    @Published var setupBusy: String?          // what is being installed right now
+    @Published var setupLog: [String] = []
+    @Published var setupError: String?
+    @Published var ollamaStarting = false
+    private var setupTask: Task<Void, Never>?
+    private var pollTimer: Timer?
+
+    // MARK: Model downloads (shared by Setup and the model manager)
+    @Published var pullName: String?
+    @Published var pullStatus = ""
+    @Published var pullDone: Int64 = 0
+    @Published var pullTotal: Int64 = 0
+    @Published var pullError: String?
+    private var pullTask: Task<Void, Never>?
 
     // MARK: Compare
     @Published var comparePage: Int?
@@ -60,11 +79,41 @@ final class AppModel: ObservableObject {
     @Published var bookTitle = ""
     @Published var bookAuthor = ""
     @Published var bookLanguage = "bn"
+    var userSetLanguage = false
     @Published var pageMarkers = false
     @Published var pagesPerChapter = 10
+    @Published var autoChapters = true { didSet { refreshStructure() } }
+    @Published var structureSummary = ""
+    @Published var pageLabels: [Int: String] = [:]
+    private var structureTask: Task<Void, Never>?
+
+    /// Re-detects chapters, contents and index in the background after results change.
+    func refreshStructure() {
+        structureTask?.cancel()
+        let pages = results.keys.sorted().map { ($0, results[$0]!.text) }
+        let drop = dropHeaders, every = pagesPerChapter, auto = autoChapters, title = bookTitle
+        guard !pages.isEmpty else { structureSummary = ""; pageLabels = [:]; return }
+        structureTask = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000) // debounce
+            if Task.isCancelled { return }
+            let lang = await Task.detached { BookStructure.dominantLanguage(pages.map(\.1)) }.value
+            if let lang, !userSetLanguage { bookLanguage = lang }
+            let (summary, labels) = await Task.detached { () -> (String, [Int: String]) in
+                let s = BookStructure.analyze(pages, dropHeaders: drop, bookTitle: title)
+                let secs = BookStructure.sections(s, fallbackEvery: every, autoDetect: auto)
+                let found = s.contains { $0.kind != .body } || secs.contains { $0.kind == .body && $0.title != "Beginning" && $0.title != "Text" }
+                let text = auto && found ? "Detected: " + BookStructure.summary(secs)
+                    : "\(secs.count) parts of \(every) pages" + (auto ? " (no chapter headings found yet)" : "")
+                return (text, BookStructure.pageLabels(s))
+            }.value
+            if Task.isCancelled { return }
+            structureSummary = summary
+            pageLabels = labels
+        }
+    }
 
     private init() {
-        engine = OCREngine(rawValue: defaults.string(forKey: "engine") ?? "") ?? .ollama
+        engine = OCREngine(rawValue: defaults.string(forKey: "engine") ?? "") ?? (Tesseract.isInstalled ? .tesseract : .ollama)
         selectedModel = defaults.string(forKey: "model") ?? ""
         tessLang = defaults.string(forKey: "tessLang") ?? "ben+eng"
         modelImageSize = defaults.object(forKey: "modelPx") as? Double ?? 1600
@@ -74,6 +123,116 @@ final class AppModel: ObservableObject {
         tessLanguages = Tesseract.languages()
         bookLanguage = LanguageNames.bcp47(tessLang)
         Task { await refreshModels() }
+        // Notice when the user starts Ollama (or finishes an install) without needing a relaunch.
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            Task { @MainActor in await AppModel.shared.poll() }
+        }
+    }
+
+    private func poll() async {
+        if ollamaVersion == nil || models.isEmpty {
+            let v = await OllamaClient.shared.version()
+            if v != nil && (ollamaVersion == nil || models.isEmpty) { await refreshModels() }
+            else if v == nil && ollamaVersion != nil { ollamaVersion = nil; models = [] }
+        }
+    }
+
+    // MARK: - Setup checks
+
+    var hasBangla: Bool { tessLanguages.contains("ben") }
+    var tesseractReady: Bool { Tesseract.isInstalled && !tessLanguages.isEmpty }
+    var modelReady: Bool { ollamaVersion != nil && !visionModels.isEmpty }
+    /// At least one engine works.
+    var canTranscribe: Bool { tesseractReady || modelReady }
+    var setupIncomplete: Bool { !Tesseract.isInstalled || !hasBangla || !modelReady }
+
+    func refreshTesseract() {
+        tesseractVersion = Tesseract.version()
+        tessLanguages = Tesseract.languages()
+        let parts = tessLang.split(separator: "+").map(String.init)
+        if !parts.allSatisfy(tessLanguages.contains) {
+            tessLang = hasBangla ? (tessLanguages.contains("eng") ? "ben+eng" : "ben") : (tessLanguages.first { $0 == "eng" } ?? tessLanguages.first ?? "eng")
+        }
+    }
+
+    /// brew install tesseract (+ all language packs, which include Bangla).
+    func installTesseract() {
+        guard setupBusy == nil else { return }
+        let formulas = Tesseract.isInstalled ? ["tesseract-lang"] : ["tesseract", "tesseract-lang"]
+        setupBusy = Tesseract.isInstalled ? "Adding Tesseract language packs…" : "Installing Tesseract…"
+        setupLog = ["$ brew install \(formulas.joined(separator: " "))"]
+        setupError = nil
+        setupTask = Task {
+            do {
+                try await Setup.brew(["install"] + formulas) { line in
+                    self.setupLog.append(line)
+                    if self.setupLog.count > 400 { self.setupLog.removeFirst(100) }
+                }
+                setupLog.append("✓ Done")
+            } catch {
+                if !Task.isCancelled { setupError = error.localizedDescription }
+            }
+            refreshTesseract()
+            setupBusy = nil
+        }
+    }
+
+    func cancelSetupTask() {
+        setupTask?.cancel()
+        setupBusy = nil
+    }
+
+    func startOllama() {
+        setupError = nil
+        do {
+            try Setup.startOllama()
+            ollamaStarting = true
+            Task {
+                for _ in 0..<20 {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if await OllamaClient.shared.version() != nil { break }
+                }
+                await refreshModels()
+                ollamaStarting = false
+                if ollamaVersion == nil { setupError = "Ollama didn't start. Open it from Applications, or run `ollama serve` in Terminal." }
+            }
+        } catch {
+            setupError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Model downloads
+
+    func pull(_ raw: String) {
+        let name = raw.trimmed
+        guard !name.isEmpty, pullName == nil else { return }
+        pullName = name
+        pullStatus = "Starting…"
+        pullDone = 0
+        pullTotal = 0
+        pullError = nil
+        pullTask = Task {
+            do {
+                try await OllamaClient.shared.pull(model: name) { status, done, total in
+                    self.pullStatus = status
+                    if total > 0 { self.pullDone = done; self.pullTotal = total }
+                }
+                await refreshModels()
+                let base = name.split(separator: ":").first.map(String.init) ?? name
+                if let m = models.first(where: { $0.name == name || $0.name == name + ":latest" || ($0.name.hasPrefix(base) && $0.isVision) }),
+                   m.isVision, !visionModels.contains(where: { $0.name == selectedModel }) || selectedModel.isEmpty {
+                    selectedModel = m.name
+                }
+                if modelReady && defaults.string(forKey: "engine") == nil { engine = .ollama }
+            } catch {
+                if !Task.isCancelled { pullError = Self.friendly(error) }
+            }
+            pullName = nil
+        }
+    }
+
+    func cancelPull() {
+        pullTask?.cancel()
     }
 
     var visionModels: [OllamaModel] { models.filter(\.isVision) }
@@ -97,6 +256,11 @@ final class AppModel: ObservableObject {
         if !models.contains(where: { $0.name == selectedModel }) {
             selectedModel = visionModels.first?.name ?? models.first?.name ?? ""
         }
+        // First run: pick an engine that actually works on this Mac.
+        if defaults.string(forKey: "engine") == nil {
+            let pick: OCREngine = !visionModels.isEmpty ? .ollama : (Tesseract.isInstalled ? .tesseract : .ollama)
+            if engine != pick { engine = pick }
+        }
     }
 
     func unloadModels(_ names: [String]) {
@@ -107,19 +271,7 @@ final class AppModel: ObservableObject {
 
     func prompt(for model: String) -> String {
         if !customPrompt.trimmed.isEmpty { return customPrompt }
-        let n = model.lowercased()
-        if n.hasPrefix("glm-ocr") { return "Text Recognition:" }
-        if n.hasPrefix("deepseek-ocr") { return "Free OCR." }
-        let lang = LanguageNames.describe(tessLang)
-        return """
-        You are a precise OCR engine. Transcribe all the text on this book page exactly as printed. \
-        The page is most likely written in \(lang).
-        Rules:
-        - Keep the original language and script. Never translate, correct, or summarize.
-        - Follow the natural reading order. Separate paragraphs with one blank line.
-        \(dropHeaders ? "- Leave out running headers, footers and page numbers.\n" : "")\
-        - Output only the transcribed text: no comments, no markdown, no code fences.
-        """
+        return OCRPrompt.build(model: model, languages: tessLang, dropHeaders: dropHeaders)
     }
 
     // MARK: - Opening
@@ -146,6 +298,7 @@ final class AppModel: ObservableObject {
         tessRun = EngineRun()
         modelRun = EngineRun()
         results = loadCache(for: doc)
+        refreshStructure()
         jobFrom = 1
         jobTo = doc.pageCount
         jobDone = 0
@@ -156,6 +309,7 @@ final class AppModel: ObservableObject {
         jobImage = nil
         jobLiveText = ""
         bookTitle = doc.title
+        userSetLanguage = false
         bookAuthor = doc.author ?? ""
         compareSimilarity = nil
         textLayerCoverage = doc.textLayerCoverage()
@@ -211,6 +365,10 @@ final class AppModel: ObservableObject {
     }
 
     private func compareTesseract(_ doc: SourceDocument, _ page: Int) async {
+        guard Tesseract.isInstalled else {
+            tessRun.state = .failed("Tesseract isn't installed. Click Setup in the toolbar to install it (with Bangla).")
+            return
+        }
         let start = Date()
         tessRun = EngineRun(state: .running(start: start))
         do {
@@ -224,8 +382,12 @@ final class AppModel: ObservableObject {
     }
 
     private func compareModel(_ doc: SourceDocument, _ page: Int, _ model: String) async {
-        guard !model.isEmpty else {
-            modelRun.state = .failed("No local model selected. Start Ollama and pick a vision model.")
+        guard ollamaVersion != nil else {
+            modelRun.state = .failed("Ollama isn't running, so the local model can't be used. Click Setup in the toolbar to install or start it.")
+            return
+        }
+        guard !model.isEmpty, visionModels.contains(where: { $0.name == model }) else {
+            modelRun.state = .failed("No vision model installed yet. Click Setup in the toolbar to download \(Setup.recommendedModel) (recommended).")
             return
         }
         let start = Date()
@@ -257,7 +419,9 @@ final class AppModel: ObservableObject {
         let avg = jobPageSeconds / Double(jobDone)
         let current = jobPageStart.map { Date().timeIntervalSince($0) } ?? 0
         let remainingPages = Double(max(0, jobTotal - jobDone - 1))
-        return remainingPages * avg + max(0, avg - current)
+        // If this page is running long, assume it needs a little more rather than "0s".
+        let currentLeft = current < avg ? avg - current : max(5, avg * 0.15)
+        return remainingPages * avg + currentLeft
     }
 
     func startJob() {
@@ -266,8 +430,14 @@ final class AppModel: ObservableObject {
             alert = "This file has no text layer (it's a scan). Use Tesseract or the local model."
             return
         }
-        if engine == .ollama && selectedModel.isEmpty {
-            alert = "Pick a local model first (or switch the engine to Tesseract)."
+        if engine == .ollama && !modelReady {
+            alert = ollamaVersion == nil
+                ? "Ollama isn't running. Open Setup (toolbar) to start or install it, or switch the engine to Tesseract."
+                : "No vision model installed. Open Setup (toolbar) to download \(Setup.recommendedModel), or switch the engine to Tesseract."
+            return
+        }
+        if engine == .tesseract && !Tesseract.isInstalled {
+            alert = "Tesseract isn't installed. Open Setup (toolbar) to install it, or switch the engine to the local model."
             return
         }
         let from = max(1, min(jobFrom, doc.pageCount)), to = max(from, min(jobTo, doc.pageCount))
@@ -408,6 +578,7 @@ final class AppModel: ObservableObject {
     }
 
     private func saveCache() {
+        refreshStructure()
         guard let doc = document, let url = cacheURL(for: doc) else { return }
         if results.isEmpty { try? FileManager.default.removeItem(at: url); return }
         if let data = try? JSONEncoder().encode(results) { try? data.write(to: url, options: .atomic) }
@@ -426,7 +597,7 @@ final class AppModel: ObservableObject {
         panel.nameFieldStringValue = (bookTitle.isEmpty ? doc.title : bookTitle) + ".epub"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let meta = BookMeta(title: bookTitle, author: bookAuthor, language: bookLanguage,
-                            pageMarkers: pageMarkers, pagesPerChapter: pagesPerChapter)
+                            pageMarkers: pageMarkers, pagesPerChapter: pagesPerChapter, autoChapters: autoChapters)
         let pages = orderedPages
         let drop = dropHeaders
         Task.detached {
@@ -446,7 +617,8 @@ final class AppModel: ObservableObject {
         panel.allowedContentTypes = [.plainText]
         panel.nameFieldStringValue = (bookTitle.isEmpty ? doc.title : bookTitle) + ".txt"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let text = EPUBExporter.plainText(pages: orderedPages, dropPageNumbers: dropHeaders, markers: pageMarkers)
+        let text = EPUBExporter.plainText(pages: orderedPages, dropPageNumbers: dropHeaders, markers: pageMarkers,
+                                          autoChapters: autoChapters, pagesPerChapter: pagesPerChapter, bookTitle: bookTitle)
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([url])

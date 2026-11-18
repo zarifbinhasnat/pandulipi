@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Pandulipi.app into ./build. Usage: ./build.sh [--zip] [--install]
+# Builds Pandulipi.app into ./build. Usage: ./build.sh [--universal] [--zip] [--install]
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -7,7 +7,21 @@ VERSION="${VERSION:-1.0.0}"
 APP="build/Pandulipi.app"
 
 echo "▸ Compiling (release)…"
-swift build -c release
+bin_for() { # $1 = arm64 | x86_64
+  swift build -c release --triple "$1-apple-macosx14.0" >&2
+  echo "$(swift build -c release --triple "$1-apple-macosx14.0" --show-bin-path)/Pandulipi"
+}
+if [[ " $* " == *" --universal "* ]]; then
+  ARM_BIN="$(bin_for arm64)"
+  echo "▸ Compiling Intel slice…"
+  X86_BIN="$(bin_for x86_64)"
+  mkdir -p build && lipo -create "$ARM_BIN" "$X86_BIN" -output build/Pandulipi-bin
+  BIN=build/Pandulipi-bin
+  ARCH=universal
+else
+  ARCH="$(uname -m)"
+  BIN="$(bin_for "$ARCH")"
+fi
 
 echo "▸ Making icon…"
 ICONSET="build/AppIcon.iconset"
@@ -23,13 +37,13 @@ iconutil -c icns "$ICONSET" -o build/AppIcon.icns
 echo "▸ Assembling bundle…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$(swift build -c release --show-bin-path)/Pandulipi" "$APP/Contents/MacOS/"
+cp "$BIN" "$APP/Contents/MacOS/Pandulipi"
 cp build/AppIcon.icns "$APP/Contents/Resources/"
 sed "s/__VERSION__/$VERSION/g" Resources/Info.plist > "$APP/Contents/Info.plist"
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1
 
 if [[ " $* " == *" --zip "* ]]; then
-  ZIP="build/Pandulipi-$VERSION-macOS-$(uname -m).zip"
+  ZIP="build/Pandulipi-$VERSION-macOS-$ARCH.zip"
   rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"
   echo "▸ Zipped: $ZIP"

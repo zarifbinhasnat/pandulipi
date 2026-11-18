@@ -10,11 +10,12 @@ struct TranscribeView: View {
                 setupCard
                 progressCard
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: 216)
 
             HStack(spacing: 12) {
                 PageImagePane(image: app.jobImage,
-                              caption: app.jobCurrentPage.map { "Now reading page \($0 + 1)" } ?? "Current page")
+                              caption: app.jobCurrentPage.map { "Now reading page \($0 + 1)" } ?? "Current page",
+                              loading: app.jobRunning)
                 VStack(alignment: .leading, spacing: 8) {
                     Label("Live output", systemImage: "text.alignleft").font(.headline)
                     ZStack(alignment: .topLeading) {
@@ -78,6 +79,7 @@ struct TranscribeView: View {
             if let err = app.jobError {
                 Label(err, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                    .lineLimit(3)
             }
         }
     }
@@ -118,14 +120,25 @@ struct TranscribeView: View {
         Card(title: "Export", symbol: "book.closed") {
             TextField("Title", text: $app.bookTitle)
             TextField("Author", text: $app.bookAuthor)
-            Picker("Language", selection: $app.bookLanguage) {
+            Picker("Language", selection: Binding(get: { app.bookLanguage }, set: { app.userSetLanguage = true; app.bookLanguage = $0 })) {
                 Text("Bangla (bn)").tag("bn")
                 Text("English (en)").tag("en")
                 Text("Hindi (hi)").tag("hi")
                 Text("Arabic (ar)").tag("ar")
                 if !["bn", "en", "hi", "ar"].contains(app.bookLanguage) { Text(app.bookLanguage).tag(app.bookLanguage) }
             }
-            Stepper("Chapter every \(app.pagesPerChapter) pages", value: $app.pagesPerChapter, in: 1...100)
+            Picker("Chapters", selection: $app.autoChapters) {
+                Text("Detect automatically").tag(true)
+                Text("Every N pages").tag(false)
+            }
+            if !app.autoChapters {
+                Stepper("Every \(app.pagesPerChapter) pages", value: $app.pagesPerChapter, in: 1...100)
+            }
+            if !app.structureSummary.isEmpty {
+                Label(app.structureSummary, systemImage: "list.bullet.indent")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help("Chapters, contents, index, notes and bibliography found in the transcribed pages. Used for the EPUB's table of contents.")
+            }
             Toggle("Show page numbers in book", isOn: $app.pageMarkers)
             Text("\(app.results.count) pages ready").font(.caption).foregroundStyle(.secondary)
             Button { app.exportEPUB() } label: {
@@ -137,7 +150,6 @@ struct TranscribeView: View {
                 Label("Export Text…", systemImage: "doc.text").frame(maxWidth: .infinity)
             }
             .disabled(app.results.isEmpty)
-            Spacer(minLength: 0)
         }
     }
 }

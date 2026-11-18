@@ -23,8 +23,8 @@ final class SourceDocument: @unchecked Sendable {
             if doc.isLocked && !doc.unlock(withPassword: "") { return nil }
             pdf = doc
             imageURLs = []
-            title = (doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)?.trimmed.nilIfEmpty
-                ?? first.deletingPathExtension().lastPathComponent
+            title = Self.usefulTitle(doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String)
+                ?? Self.prettyFileName(first)
         } else {
             let imgs = urls
                 .filter { Self.imageExtensions.contains($0.pathExtension.lowercased()) }
@@ -39,6 +39,20 @@ final class SourceDocument: @unchecked Sendable {
         url = first
         let size = (try? FileManager.default.attributesOfItem(atPath: first.path)[.size] as? NSNumber)?.int64Value
         fileSize = size ?? 0
+    }
+
+    /// PDF title metadata is often junk left by the scanning tool ("Documento DjVu", "Microsoft Word - x.doc").
+    static func usefulTitle(_ t: String?) -> String? {
+        guard let t = t?.trimmed, t.count >= 3 else { return nil }
+        let junk = ["djvu", "untitled", "microsoft word", "scan", "document", "adobe", ".pdf", ".doc", "pdf "]
+        return junk.contains { t.lowercased().contains($0) } ? nil : t
+    }
+
+    static func prettyFileName(_ url: URL) -> String {
+        url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: #"^(download|ebook|book)\s+"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .trimmed
     }
 
     var author: String? {

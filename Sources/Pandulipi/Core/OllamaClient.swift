@@ -38,7 +38,8 @@ struct GenerationStats {
 final class OllamaClient: @unchecked Sendable {
     static let shared = OllamaClient()
 
-    let base = URL(string: "http://127.0.0.1:11434")!
+    /// `PANDULIPI_OLLAMA_URL` points the app at another server (or a dead port, to test the no-Ollama path).
+    let base = URL(string: ProcessInfo.processInfo.environment["PANDULIPI_OLLAMA_URL"] ?? "http://127.0.0.1:11434")!
 
     private let session: URLSession = {
         let c = URLSessionConfiguration.default

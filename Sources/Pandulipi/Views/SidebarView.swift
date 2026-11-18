@@ -34,7 +34,7 @@ struct SidebarView: View {
             }
 
             Section("Engine for transcription") {
-                Picker("Engine", selection: $app.engine) {
+                Picker("Engine", selection: Binding(get: { app.engine }, set: { app.userChoseEngine = true; app.engine = $0 })) {
                     ForEach(OCREngine.allCases.filter { $0 != .pdfText || app.textLayerCoverage > 0 }) {
                         Label($0.label, systemImage: $0.symbol).tag($0)
                     }
@@ -99,8 +99,14 @@ struct SidebarView: View {
                         }
                     }
                 } else {
-                    Text("Not installed. In Terminal run:\nbrew install tesseract tesseract-lang")
-                        .font(.caption).textSelection(.enabled)
+                    Text("Not installed.").font(.caption).foregroundStyle(.secondary)
+                    Button(Setup.brewPath != nil ? "Install Tesseract" : "Copy install command") {
+                        Setup.brewPath != nil ? app.installTesseract() : Setup.copy("brew install tesseract tesseract-lang")
+                    }
+                    .disabled(app.setupBusy != nil)
+                }
+                if let busy = app.setupBusy {
+                    HStack { ProgressView().controlSize(.small); Text(busy).font(.caption) }
                 }
             }
 
